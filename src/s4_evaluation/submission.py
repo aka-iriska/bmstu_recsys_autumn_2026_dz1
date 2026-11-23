@@ -5,7 +5,7 @@ from pathlib import Path
 import polars as pl
 
 from ..s2_candidates.config import ALS_ALPHA, ALS_FACTORS, ALS_REG, I2I_DAYS, I2I_WINDOW, SOURCES
-from ..s3_ranker.config import LGB_PARAMS
+from ..s3_ranker.config import ENSEMBLE_SIZE, LGB_PARAMS
 
 
 def write_submission(recs: pl.DataFrame, test_users: pl.Series, path: Path) -> pl.DataFrame:
@@ -39,6 +39,8 @@ def submission_comment(val: dict, n_trees: int, cands: pl.DataFrame) -> str:
         f"{per_user:.0f} cand/user",
         f"lgb leaves {LGB_PARAMS['num_leaves']} lr {LGB_PARAMS['learning_rate']:.3g}",
     ]
+    if ENSEMBLE_SIZE > 1:
+        parts.append(f"{ENSEMBLE_SIZE} seeds")
     if "als" in SOURCES:
         parts.append(f"iALS f{ALS_FACTORS} reg{ALS_REG:g} a{ALS_ALPHA:g}")
     if "i2i" in SOURCES:

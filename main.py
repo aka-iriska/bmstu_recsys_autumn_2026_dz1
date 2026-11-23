@@ -4,7 +4,6 @@ import argparse
 import gc
 import json
 
-import lightgbm as lgb
 import polars as pl
 
 from src.config import DAY, OUT_DIR, SEED
@@ -19,7 +18,7 @@ from src.s0_data.data import (
 )
 from src.s2_candidates.candidates import build_candidates
 from src.s3_ranker.config import BEST_PARAMS_PATH, FINAL_ROUNDS_MULT, LGB_PARAMS, MAX_ROUNDS, TUNE_TRIALS
-from src.s3_ranker.ranker import feature_cols, fill_with_pop, recommend, top_k_by, train_ranker
+from src.s3_ranker.ranker import Ensemble, feature_cols, fill_with_pop, recommend, top_k_by, train_ensemble
 from src.s3_ranker.tuning import tune_ranker
 from src.s4_evaluation.metrics import ndcg_at_k, recall_of_candidates, source_report
 from src.s4_evaluation.submission import submission_comment, write_submission
@@ -60,7 +59,7 @@ def stage2_labeled_candidates(past: pl.DataFrame, T: int, truth: pl.DataFrame) -
     return cands, pop_items
 
 
-def stage4_evaluate(model: lgb.Booster, cands: pl.DataFrame, truth: pl.DataFrame, pop_items: list) -> dict:
+def stage4_evaluate(model: Ensemble, cands: pl.DataFrame, truth: pl.DataFrame, pop_items: list) -> dict:
     """NDCG@10 ранкера и простых сортировок по одному признаку на пользователях, которых ранкер не видел."""
     users = truth["uid"].unique()
     ranker_recs = recommend(model, cands, users, pop_items)
@@ -76,7 +75,7 @@ def stage4_evaluate(model: lgb.Booster, cands: pl.DataFrame, truth: pl.DataFrame
     return scores
 
 
-def log_importance(model: lgb.Booster, top: int = 20) -> None:
+def log_importance(model: Ensemble, top: int = 20) -> None:
     """Печатает признаки, которые сильнее всего улучшили деревья ранкера (суммарный gain)."""
     gains = zip(model.feature_name(), model.feature_importance("gain"))
     imp = sorted(gains, key=lambda x: -x[1])
@@ -139,7 +138,7 @@ def evaluate_ranker(rounds: int) -> None:
     cands_a, cands_b, truth, pop_items = load_validation_folds()
     tr_u, es_u, ev_u = split_users(truth["uid"].unique())
     log(f"users: train {len(tr_u):,} | early-stop {len(es_u):,} | eval {len(ev_u):,}")
-    model = train_ranker([of_users(cands_a, tr_u)], [of_users(cands_b, es_u)], rounds)
+    model = train_ensemble([of_users(cands_a, tr_u)], [of_users(cands_b, es_u)], rounds)
     scores = stage4_evaluate(model, of_users(cands_b, ev_u), of_users(truth, ev_u), pop_items)
     log_importance(model)
     VAL_RESULT.write_text(json.dumps({"best_iter": model.best_iteration, **scores}))
@@ -162,15 +161,15 @@ def tune(trials: int) -> None:
     log(f"best params saved to {BEST_PARAMS_PATH}, validate and submit will use them: {best}")
 
 
-def stage3_final_ranker(final_rounds: int) -> lgb.Booster:
+def stage3_final_ranker(final_rounds: int) -> Ensemble:
     """Учит итоговый ранкер на срезах A и B всех пользователей; деревьев - best_iter × FINAL_ROUNDS_MULT."""
     best = json.loads(VAL_RESULT.read_text())["best_iter"]
     rounds = final_rounds or max(int(best * FINAL_ROUNDS_MULT), 50)
     log_params()
     log(f"final ranker: {rounds} rounds on slices A and B of all users")
     folds = [pl.read_parquet(FOLD_A_PATH), pl.read_parquet(FOLD_B_PATH)]
-    model = train_ranker(folds, None, rounds)
-    model.save_model(str(OUT_DIR / "ranker.txt"))
+    model = train_ensemble(folds, None, rounds)
+    model.save_model(OUT_DIR / "ranker.txt")
     return model
 
 

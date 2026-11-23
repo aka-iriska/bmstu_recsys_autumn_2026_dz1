@@ -1,4 +1,5 @@
 import json
+import os
 
 from ..config import OUT_DIR, SEED
 
@@ -19,6 +20,7 @@ LGB_DEFAULTS = dict(
     seed=SEED,
     num_threads=0,
 )
+ENSEMBLE_SIZE = int(os.environ.get("RECSYS_SEEDS", 1))  # сколько ранкеров с разными seed усредняется; 1 - один ранкер
 MAX_ROUNDS = 2000
 EARLY_STOPPING = 100
 FINAL_ROUNDS_MULT = 1.3  # финальный ранкер учится на двух срезах всех пользователей, данных втрое больше

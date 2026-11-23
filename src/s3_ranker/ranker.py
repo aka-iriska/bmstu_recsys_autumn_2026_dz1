@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import lightgbm as lgb
 import numpy as np
 import polars as pl
 
-from .config import EARLY_STOPPING, LGB_PARAMS, MAX_ROUNDS
+from ..config import SEED
+from .config import EARLY_STOPPING, ENSEMBLE_SIZE, LGB_PARAMS, MAX_ROUNDS
 
 NON_FEATURES = {"uid", "item_id", "label"}
 
@@ -41,21 +44,26 @@ def to_lgb(frames: list[pl.DataFrame], feats: list[str], params: dict | None = N
 
 
 def train_ranker(
-    train: list[pl.DataFrame], early_stop: list[pl.DataFrame] | None = None, rounds: int = MAX_ROUNDS
+    train: list[pl.DataFrame],
+    early_stop: list[pl.DataFrame] | None = None,
+    rounds: int = MAX_ROUNDS,
+    seed: int = SEED,
 ) -> lgb.Booster:
     """Обучает LambdaRank на таблицах кандидатов train; пользователи без верных кандидатов не участвуют.
 
     :param train: таблицы кандидатов для обучения, например срезы A и B
     :param early_stop: таблицы кандидатов для ранней остановки; None - учить ровно rounds деревьев
+    :param seed: seed LightGBM: от него зависит, какие строки и признаки видит каждое дерево
     """
 
+    params = {**LGB_PARAMS, "seed": seed}
     feats = feature_cols(train[0])
     dtrain = to_lgb(train, feats)
     if early_stop is None:
-        return lgb.train(LGB_PARAMS, dtrain, num_boost_round=rounds)
+        return lgb.train(params, dtrain, num_boost_round=rounds)
     dvalid = to_lgb(early_stop, feats)
     return lgb.train(
-        LGB_PARAMS,
+        params,
         dtrain,
         num_boost_round=rounds,
         valid_sets=[dvalid],
@@ -64,7 +72,55 @@ def train_ranker(
     )
 
 
-def predict_scores(model: lgb.Booster, cands: pl.DataFrame) -> pl.DataFrame:
+class Ensemble:
+    """Несколько ранкеров с разными seed: оценка кандидата - среднее их оценок; повторяет нужное из интерфейса Booster.
+
+    :cvar models: обученные ранкеры, у всех одинаковые признаки
+    """
+
+    def __init__(self, models: list[lgb.Booster]):
+        """Запоминает обученные ранкеры."""
+        self.models = models
+
+    @property
+    def best_iteration(self) -> int:
+        """Среднее по ранкерам число деревьев, на котором сработала ранняя остановка."""
+        return round(sum(m.best_iteration for m in self.models) / len(self.models))
+
+    def feature_name(self) -> list[str]:
+        """Названия признаков в том порядке, в котором их ждут ранкеры."""
+        return self.models[0].feature_name()
+
+    def predict(self, X: np.ndarray, num_threads: int = 0) -> np.ndarray:
+        """Среднее предсказаний всех ранкеров."""
+        return np.mean([m.predict(X, num_threads=num_threads) for m in self.models], axis=0)
+
+    def feature_importance(self, importance_type: str = "split") -> np.ndarray:
+        """Средняя по ранкерам важность признаков."""
+        return np.mean([m.feature_importance(importance_type) for m in self.models], axis=0)
+
+    def num_trees(self) -> int:
+        """Число деревьев в одном ранкере (у всех в итоговой модели оно одинаковое)."""
+        return self.models[0].num_trees()
+
+    def save_model(self, path: Path) -> None:
+        """Сохраняет ранкеры в файлы <имя>_0, <имя>_1 и так далее рядом с path."""
+        for i, model in enumerate(self.models):
+            model.save_model(str(path.with_name(f"{path.stem}_{i}{path.suffix}")))
+
+
+def train_ensemble(
+    train: list[pl.DataFrame],
+    early_stop: list[pl.DataFrame] | None = None,
+    rounds: int = MAX_ROUNDS,
+    size: int = ENSEMBLE_SIZE,
+) -> Ensemble:
+    """Обучает size ранкеров с seed SEED, SEED + 1, ... и объединяет их; при size = 1 это один обычный ранкер."""
+    models = [train_ranker(train, early_stop, rounds, SEED + i) for i in range(size)]
+    return Ensemble(models)
+
+
+def predict_scores(model: lgb.Booster | Ensemble, cands: pl.DataFrame) -> pl.DataFrame:
     """Оценка ранкера для каждой строки кандидатов; считает по 2 млн строк, чтобы не занять всю память."""
     feats = model.feature_name()
     assert feats == feature_cols(cands), "признаки кандидатов не совпадают с признаками модели"
