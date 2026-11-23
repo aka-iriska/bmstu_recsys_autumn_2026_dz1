@@ -8,7 +8,15 @@ import lightgbm as lgb
 import polars as pl
 
 from src.config import DAY, OUT_DIR, SEED
-from src.s0_data.data import load_test_users, load_train, make_truth, split_users, time_split, validation_boundary
+from src.s0_data.data import (
+    earlier_boundary,
+    load_test_users,
+    load_train,
+    make_truth,
+    split_users,
+    time_split,
+    validation_boundary,
+)
 from src.s2_candidates.candidates import build_candidates
 from src.s3_ranker.config import BEST_PARAMS_PATH, FINAL_ROUNDS_MULT, LGB_PARAMS, MAX_ROUNDS, TUNE_TRIALS
 from src.s3_ranker.ranker import feature_cols, fill_with_pop, recommend, top_k_by, train_ranker
@@ -17,8 +25,11 @@ from src.s4_evaluation.metrics import ndcg_at_k, recall_of_candidates, source_re
 from src.s4_evaluation.submission import submission_comment, write_submission
 from src.utils import log
 
-FOLD_PATH = OUT_DIR / "train_fold.parquet"
+FOLD_A_PATH = OUT_DIR / "fold_a.parquet"  # кандидаты среза A (раньше): учат ранкер
+FOLD_B_PATH = OUT_DIR / "fold_b.parquet"  # кандидаты среза B (позже): ранняя остановка и оценка
 VAL_RESULT = OUT_DIR / "val_result.json"
+TRUTH_PATH = OUT_DIR / "truth.parquet"  # правильные ответы среза B
+POP_PATH = OUT_DIR / "pop_items.json"
 BASELINE_COLS = ("ui_w7", "ui_cnt", "als_score")  # бейзлайны: сортировка кандидатов по одному признаку
 
 
@@ -27,17 +38,17 @@ def of_users(df: pl.DataFrame, uids: list) -> pl.DataFrame:
     return df.filter(pl.col("uid").is_in(uids))
 
 
-def stage0_validation_slice() -> tuple[pl.DataFrame, int, pl.DataFrame]:
-    """Режет train.parquet по моменту T_val: события до него (past) и правильные ответы после него (truth)."""
+def stage0_validation_boundaries() -> tuple[pl.DataFrame, int, int]:
+    """Читает train.parquet и возвращает его вместе с границами срезов: T_A (раньше) и T_B (позже)."""
     df = load_train()
-    T = validation_boundary(df)
-    past, future = time_split(df, T)
-    truth = make_truth(future)
+    T_b = validation_boundary(df)
+    T_a = earlier_boundary(df, T_b)
+    end = int(df["timestamp"].max()) + 1
     log(f"train: {df.height:,} events, {df['uid'].n_unique():,} users, {df['item_id'].n_unique():,} items, "
         f"span {(df['timestamp'].max() - df['timestamp'].min()) / DAY:.1f} days")
-    log(f"T_val={T}: past {past.height:,} events | future {future.height:,} events over "
-        f"{(df['timestamp'].max() - T) / DAY:.1f} days, {truth.height:,} positive pairs")
-    return past, T, truth
+    log(f"slice A: T_A={T_a}, labels from {(T_b - T_a) / DAY:.1f} days | "
+        f"slice B: T_B={T_b}, labels from {(end - T_b) / DAY:.1f} days")
+    return df, T_a, T_b
 
 
 def stage2_labeled_candidates(past: pl.DataFrame, T: int, truth: pl.DataFrame) -> tuple[pl.DataFrame, list]:
@@ -152,19 +163,20 @@ def tune(trials: int) -> None:
 
 
 def stage3_final_ranker(final_rounds: int) -> lgb.Booster:
-    """Учит итоговый ранкер на кандидатах всех пользователей из validate; деревьев - best_iter × FINAL_ROUNDS_MULT."""
+    """Учит итоговый ранкер на срезах A и B всех пользователей; деревьев - best_iter × FINAL_ROUNDS_MULT."""
     best = json.loads(VAL_RESULT.read_text())["best_iter"]
     rounds = final_rounds or max(int(best * FINAL_ROUNDS_MULT), 50)
-    log(f"final ranker: {rounds} rounds on the whole validation slice")
-    fold = pl.read_parquet(FOLD_PATH)
-    model = train_ranker(fold, None, rounds)
+    log_params()
+    log(f"final ranker: {rounds} rounds on slices A and B of all users")
+    folds = [pl.read_parquet(FOLD_A_PATH), pl.read_parquet(FOLD_B_PATH)]
+    model = train_ranker(folds, None, rounds)
     model.save_model(str(OUT_DIR / "ranker.txt"))
     return model
 
 
 def submit(final_rounds: int) -> None:
     """Режим submit: учит итоговый ранкер, строит кандидатов по всему train и пишет submission.csv."""
-    if not FOLD_PATH.exists():
+    if not (FOLD_A_PATH.exists() and FOLD_B_PATH.exists()):
         raise SystemExit("Сначала запустите: uv run python main.py validate")
     model = stage3_final_ranker(final_rounds)
     df = load_train()
@@ -186,14 +198,18 @@ def submit(final_rounds: int) -> None:
 
 
 def main() -> None:
-    """Разбирает аргументы командной строки и запускает validate или submit."""
+    """Разбирает аргументы командной строки и запускает validate, tune или submit."""
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=["validate", "submit"])
+    p.add_argument("mode", choices=["validate", "submit", "tune"])
     p.add_argument("--rounds", type=int, default=MAX_ROUNDS, help="максимум деревьев при validate")
-    p.add_argument("--final-rounds", type=int, default=0, help="деревьев при submit (0 = best_iter * 1.15)")
+    p.add_argument("--final-rounds", type=int, default=0, help="деревьев при submit (0 = best_iter * 1.3)")
+    p.add_argument("--ranker-only", action="store_true", help="validate на сохранённых кандидатах, без их пересборки")
+    p.add_argument("--trials", type=int, default=TUNE_TRIALS, help="сколько наборов параметров перебирает tune")
     args = p.parse_args()
-    if args.mode == "validate":
-        validate(args.rounds)
+    if args.mode == "tune":
+        tune(args.trials)
+    elif args.mode == "validate":
+        validate(args.rounds, args.ranker_only)
     else:
         submit(args.final_rounds)
 

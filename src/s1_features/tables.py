@@ -3,7 +3,7 @@ from __future__ import annotations
 import polars as pl
 
 from ..config import DAY, DISLIKE, LIKE, LISTEN, UNDISLIKE, UNLIKE
-from .config import UI_DECAYS, UI_WINDOWS
+from .config import ITEM_WINDOWS, UI_DECAYS, UI_WINDOWS
 
 
 def age_days(T: int) -> pl.Expr:
@@ -125,10 +125,10 @@ def item_features(listens: pl.DataFrame, T: int) -> pl.DataFrame:
     lst = listens.with_columns(age_days(T).alias("age"))
     it = lst.group_by("item_id").agg(
         pl.len().cast(pl.Int32).alias("i_cnt"),
-        *[(pl.col("age") < d).sum().cast(pl.Int32).alias(f"i_cnt_{d}d") for d in (1, 7, 30)],
+        *[(pl.col("age") < d).sum().cast(pl.Int32).alias(f"i_cnt_{d}d") for d in ITEM_WINDOWS],
         pl.col("uid").n_unique().cast(pl.Int32).alias("i_users"),
-        pl.col("uid").filter(pl.col("age") < 7).n_unique().cast(pl.Int32).alias("i_users_7d"),
-        pl.col("uid").filter(pl.col("age") < 30).n_unique().cast(pl.Int32).alias("i_users_30d"),
+        *[pl.col("uid").filter(pl.col("age") < d).n_unique().cast(pl.Int32).alias(f"i_users_{d}d")
+          for d in ITEM_WINDOWS],
         pl.col("played_ratio_pct").mean().cast(pl.Float32).alias("i_pr_mean"),
         pl.col("is_organic").cast(pl.Float32).mean().alias("i_organic"),
         pl.col("age").min().alias("i_last_age"),
@@ -138,5 +138,6 @@ def item_features(listens: pl.DataFrame, T: int) -> pl.DataFrame:
     return it.sort("item_id").with_columns(
         (pl.col("i_cnt") / pl.col("i_users")).cast(pl.Float32).alias("i_repeat"),
         (pl.col("i_cnt_7d") / (pl.col("i_cnt_30d") + 1)).cast(pl.Float32).alias("i_trend_7_30"),
-        pl.col("i_users_7d").rank("ordinal", descending=True).cast(pl.Int32).alias("i_pop_rank_7d"),
+        *[pl.col(f"i_users_{d}d").rank("ordinal", descending=True).cast(pl.Int32).alias(f"i_pop_rank_{d}d")
+          for d in ITEM_WINDOWS],
     )

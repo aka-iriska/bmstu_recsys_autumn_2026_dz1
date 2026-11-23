@@ -6,7 +6,7 @@ import polars as pl
 
 from ..config import LISTEN
 from ..utils import rank_in_user
-from .config import POP_LIST_SIZE
+from .config import POP_LIST_SIZE, POP_WINDOW
 from .tables import item_features, reaction_features, user_features, user_item_features
 
 
@@ -30,7 +30,7 @@ class BaseFeatures:
     user: pl.DataFrame  # u_*: целевые пользователи
     reactions: pl.DataFrame  # ui_liked, ui_disliked: пары всех пользователей
     item_reactions: pl.DataFrame  # i_likes, i_dislikes
-    pop_items: list  # item_id по убыванию популярности за 7 дней
+    pop_items: list  # item_id по убыванию популярности за POP_WINDOW дней: для добивки списков и признака is_pop
 
 
 def split_past(events: pl.DataFrame, T: int, users: pl.Series) -> PastEvents:
@@ -41,10 +41,10 @@ def split_past(events: pl.DataFrame, T: int, users: pl.Series) -> PastEvents:
     return PastEvents(T=T, events=events, listens=listens, user_listens=user_listens, users=users_df)
 
 
-def popular_items(items: pl.DataFrame) -> list:
-    """Популярные треки по числу разных слушателей за 7 дней; с запасом, чтобы дополнять короткие списки."""
-    order = items.sort(["i_users_7d", "i_cnt_7d", "item_id"], descending=[True, True, False])
-    return order.head(POP_LIST_SIZE)["item_id"].to_list()
+def popular_items(items: pl.DataFrame, window: int, size: int) -> list:
+    """size самых популярных треков за window дней: по числу разных слушателей, при равенстве по прослушиваниям."""
+    order = items.sort([f"i_users_{window}d", f"i_cnt_{window}d", "item_id"], descending=[True, True, False])
+    return order.head(size)["item_id"].to_list()
 
 
 def add_history_ranks(user_item: pl.DataFrame) -> pl.DataFrame:
@@ -67,5 +67,5 @@ def compute_base_features(past: PastEvents) -> BaseFeatures:
         user=user_features(past.user_listens, past.T),
         reactions=reactions,
         item_reactions=item_reactions,
-        pop_items=popular_items(items),
+        pop_items=popular_items(items, POP_WINDOW, POP_LIST_SIZE),
     )

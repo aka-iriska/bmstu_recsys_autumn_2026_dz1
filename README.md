@@ -6,7 +6,9 @@
 
 Решение двухстадийное:
 
-1. **Отбор кандидатов.** Из ~880 тыс. треков для каждого пользователя оставляем несколько сотен правдоподобных: не больше ~550 (до 300 из истории, по 100 от i2i и iALS, 50 популярных), на деле меньше из-за пересечений источников. Точное число печатает `validate` (строка `candidates: ... (N/user)`).
+1. **Отбор кандидатов.** Из ~880 тыс. треков для каждого пользователя оставляем несколько сотен правдоподобных: 
+не больше ~550 (до 300 из истории, 100 от iALS, до 150 популярных: по 50 за 1, 7 и 30 дней; i2i выключен), 
+на деле меньше из-за пересечений источников.
 2. **Ранжирование.** LightGBM LambdaRank сортирует этих кандидатов, топ-10 идёт в сабмит.
 
 ## Установка и запуск
@@ -24,13 +26,14 @@ uv run python main.py validate
 uv run python main.py submit
 ```
 
-- `validate` считает локальный NDCG@10, подбирает число деревьев и сохраняет обучающий срез в `output/train_fold.parquet`.
+- `validate` считает локальный NDCG@10, подбирает число деревьев и сохраняет в `output/` кандидатов двух срезов (`fold_a.parquet`, `fold_b.parquet`), правильные ответы (`truth.parquet`) и список популярного (`pop_items.json`).
+- `validate --ranker-only` делает то же без пересборки кандидатов, по сохранённым файлам: около 1,5 минуты. Подходит для проверки параметров ранкера.
+- `tune` подбирает параметры LightGBM через Optuna по сохранённым кандидатам и пишет `output/best_params.json`; 
+Чтобы вернуться к параметрам по умолчанию, удалить `best_params.json`. Запускать `tune` нужно после того, как набор признаков окончательный: параметры подобраны под конкретную таблицу.
 - `submit` обучает финальный ранкер и пишет `output/submission.csv`.
 
-Параметры командной строки: `--rounds N` (максимум деревьев при validate), `--final-rounds N` (число деревьев при submit).
+Параметры командной строки: `--rounds N` (максимум деревьев при validate), `--final-rounds N` (число деревьев при submit), `--ranker-only`, `--trials N` (число испытаний в tune).
 Пути переопределяются переменными окружения `RECSYS_DATA` и `RECSYS_OUT`.
-
-При запуске `validate` и `submit` в консоль печатается вход ранкера: размер таблицы кандидатов и 5 случайных строк, признаки по строкам. Самые важные признаки `validate` печатает в конце (`top features`).
 
 ## Структура проекта
 
@@ -48,10 +51,11 @@ uv run python main.py submit
 | `src/s2_candidates/candidates.py` | 2 | `build_candidates`: точка входа этапов 1–2, считает признаки, собирает кандидатов из источников |
 | `src/s2_candidates/sources/base.py` | 2 | Интерфейс источника `Source`, реестр `SOURCE_CLASSES`, `make_sources` |
 | `src/s2_candidates/sources/hist.py` | 2 | `HistSource`: треки из истории пользователя |
-| `src/s2_candidates/sources/pop.py` | 2 | `PopSource`: популярное за 7 дней |
-| `src/s2_candidates/sources/i2i.py` | 2 | `I2ISource`: item2item по совместной встречаемости в сессиях |
+| `src/s2_candidates/sources/pop.py` | 2 | `PopSource`: популярное за 1, 7 и 30 дней |
+| `src/s2_candidates/sources/i2i.py` | 2 | `I2ISource`: item2item по совместной встречаемости в сессиях (сейчас выключен в `SOURCES`) |
 | `src/s2_candidates/sources/als.py` | 2 | `AlsSource`: iALS через `implicit`, веса уверенности, кандидаты, признаки |
 | `src/s3_ranker/ranker.py` | 3 | `train_ranker`, `recommend` (LightGBM LambdaRank) |
+| `src/s3_ranker/tuning.py` | 3 | `tune_ranker`: подбор параметров LightGBM через Optuna |
 | `src/s4_evaluation/metrics.py` | 4 | NDCG@10, полнота кандидатов, отчёт по источникам |
 | `src/s4_evaluation/submission.py` | 4 | Сборка `submission.csv` |
 | `scripts/make_synthetic_data.py` | - | Маленький синтетический датасет для проверки пайплайна |
@@ -68,5 +72,4 @@ uv run python main.py submit
 ## Что дальше
 
 - Подобрать веса уверенности iALS и `ALS_FACTORS` по полноте источника `als` и итоговому NDCG.
-- Добавить второй, более ранний временной срез для обучения ранкера: вдвое больше данных и проверка стабильности во времени.
 - Сдача: выбрать 2 сабмита для Private по **локальной** валидации, а не по Public.

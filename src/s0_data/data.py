@@ -36,9 +36,15 @@ def validation_boundary(df: pl.DataFrame) -> int:
     return int(ts.quantile(1 - VAL_FUTURE_SHARE, interpolation="nearest"))
 
 
-def time_split(df: pl.DataFrame, T: int) -> tuple[pl.DataFrame, pl.DataFrame]:
+def earlier_boundary(df: pl.DataFrame, T: int) -> int:
+    """Момент T_A на длину окна «будущего» раньше T: окно меток среза A [T_A, T) такой же длины, как у среза B."""
+    window = int(df["timestamp"].max()) + 1 - T
+    return T - window
+
+
+def time_split(df: pl.DataFrame, T: int, end: int | None = None) -> tuple[pl.DataFrame, pl.DataFrame]:
     """
-    Делит события на past (< T) и future (>= T).
+    Делит события на past (< T) и future (>= T и < end, если end задан).
 
     По past для каждой пары «пользователь × трек» строим признаки:
     сколько раз и как давно пользователь слушал трек, насколько трек популярен, его скоры i2i и iALS.
@@ -47,6 +53,8 @@ def time_split(df: pl.DataFrame, T: int) -> tuple[pl.DataFrame, pl.DataFrame]:
 
     past = df.filter(pl.col("timestamp") < T)
     future = df.filter(pl.col("timestamp") >= T)
+    if end is not None:
+        future = future.filter(pl.col("timestamp") < end)
 
     return past, future
 

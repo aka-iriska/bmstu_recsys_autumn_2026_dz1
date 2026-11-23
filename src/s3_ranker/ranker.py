@@ -20,32 +20,40 @@ def only_users_with_pos(df: pl.DataFrame) -> pl.DataFrame:
     return df.join(pos_users, on="uid", how="semi").sort(["uid", "item_id"])
 
 
-def to_lgb(df: pl.DataFrame, feats: list[str]) -> lgb.Dataset:
-    """lgb.Dataset для LambdaRank: group - сколько строк подряд у каждого пользователя (df отсортирован по uid)."""
-    groups = df.group_by("uid", maintain_order=True).len()["len"].to_numpy()
-    X = df.select(feats).to_numpy().astype(np.float32)
+def to_lgb(frames: list[pl.DataFrame], feats: list[str], params: dict | None = None) -> lgb.Dataset:
+    """lgb.Dataset для LambdaRank из таблиц кандидатов; пользователи без верных кандидатов отбрасываются.
+
+    :param frames: таблицы кандидатов, например два временных среза; один пользователь в двух срезах - две группы
+    :param params: параметры набора данных LightGBM, например {"feature_pre_filter": False} для подбора параметров
+    """
+    frames = [only_users_with_pos(f) for f in frames]
+    groups = np.concatenate([f.group_by("uid", maintain_order=True).len()["len"].to_numpy() for f in frames])
+    X = np.vstack([f.select(feats).to_numpy().astype(np.float32) for f in frames])
+    label = np.concatenate([f["label"].to_numpy() for f in frames])
     return lgb.Dataset(
-        data = X,
-        label = df["label"].to_numpy(),
+        data=X,
+        label=label,
         group=groups,
         feature_name=feats,
-        free_raw_data=True
+        params=params,
+        free_raw_data=True,
     )
 
 
-def train_ranker(train: pl.DataFrame, early_stop: pl.DataFrame | None = None, rounds: int = MAX_ROUNDS) -> lgb.Booster:
-    """Обучает LambdaRank; пользователи без верных кандидатов не участвуют, у них нет пар (1, 0).
+def train_ranker(
+    train: list[pl.DataFrame], early_stop: list[pl.DataFrame] | None = None, rounds: int = MAX_ROUNDS
+) -> lgb.Booster:
+    """Обучает LambdaRank на таблицах кандидатов train; пользователи без верных кандидатов не участвуют.
 
-    :param early_stop: Кандидаты пользователей для ранней остановки; None - учить ровно rounds деревьев
+    :param train: таблицы кандидатов для обучения, например срезы A и B
+    :param early_stop: таблицы кандидатов для ранней остановки; None - учить ровно rounds деревьев
     """
 
-    feats = feature_cols(train)
-    train_pos = only_users_with_pos(train)
-    dtrain = to_lgb(train_pos, feats)
+    feats = feature_cols(train[0])
+    dtrain = to_lgb(train, feats)
     if early_stop is None:
         return lgb.train(LGB_PARAMS, dtrain, num_boost_round=rounds)
-    early_stop_pos = only_users_with_pos(early_stop)
-    dvalid = to_lgb(early_stop_pos, feats)
+    dvalid = to_lgb(early_stop, feats)
     return lgb.train(
         LGB_PARAMS,
         dtrain,
