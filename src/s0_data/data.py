@@ -10,7 +10,7 @@ from .config import USER_SPLIT, VAL_FUTURE_SHARE
 
 
 def load_train(path: Path = DATA_DIR / "train.parquet") -> pl.DataFrame:
-    """Читает train.parquet с компактными типами."""
+    """Читает train.parquet, сжимает типы колонок и сортирует события по пользователю и времени."""
     df = pl.read_parquet(path).select(
         pl.col("uid").cast(pl.Int32),
         pl.col("timestamp").cast(pl.Int64),
@@ -25,12 +25,12 @@ def load_train(path: Path = DATA_DIR / "train.parquet") -> pl.DataFrame:
 
 
 def load_test_users(path: Path = DATA_DIR / "test_users.csv") -> pl.Series:
-    """Пользователи, для которых нужен сабмит (тестовые)."""
+    """uid пользователей из test_users.csv, которым нужно сдать рекомендации."""
     return pl.read_csv(path)["user_id"].cast(pl.Int32)
 
 
 def validation_boundary(df: pl.DataFrame) -> int:
-    """Момент T_val, после которого остаётся доля VAL_FUTURE_SHARE прослушиваний train."""
+    """Момент T_val, после которого лежит последняя доля VAL_FUTURE_SHARE (1/9) прослушиваний train."""
 
     ts = df.filter(pl.col("event_type") == LISTEN)["timestamp"]
     return int(ts.quantile(1 - VAL_FUTURE_SHARE, interpolation="nearest"))
@@ -52,7 +52,7 @@ def time_split(df: pl.DataFrame, T: int) -> tuple[pl.DataFrame, pl.DataFrame]:
 
 
 def make_truth(future: pl.DataFrame) -> pl.DataFrame:
-    """Уникальные пары (uid, item_id), прослушанные в future, с label = 1."""
+    """Правильные ответы: пары (uid, item_id), прослушанные в future, по одной строке на пару, label = 1."""
     return (
         future.filter(pl.col("event_type") == LISTEN)
         .select("uid", "item_id")
@@ -62,7 +62,7 @@ def make_truth(future: pl.DataFrame) -> pl.DataFrame:
 
 
 def split_users(uids: pl.Series) -> tuple[list, list, list]:
-    """Случайно делит пользователей на обучение ранкера, раннюю остановку и оценку в пропорции USER_SPLIT."""
+    """Случайно делит пользователей на три группы (USER_SPLIT): обучение ранкера, выбор числа деревьев, оценка."""
     all_users = np.random.default_rng(SEED).permutation(uids.unique().sort().to_numpy())
     reranker_users = int(USER_SPLIT[0] * len(all_users))
     es_users = int((USER_SPLIT[0] + USER_SPLIT[1]) * len(all_users))
