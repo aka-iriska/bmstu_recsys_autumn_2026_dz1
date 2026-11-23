@@ -10,8 +10,9 @@ import polars as pl
 from src.config import DAY, OUT_DIR, SEED
 from src.s0_data.data import load_test_users, load_train, make_truth, split_users, time_split, validation_boundary
 from src.s2_candidates.candidates import build_candidates
-from src.s3_ranker.config import FINAL_ROUNDS_MULT, MAX_ROUNDS
+from src.s3_ranker.config import BEST_PARAMS_PATH, FINAL_ROUNDS_MULT, LGB_PARAMS, MAX_ROUNDS, TUNE_TRIALS
 from src.s3_ranker.ranker import feature_cols, fill_with_pop, recommend, top_k_by, train_ranker
+from src.s3_ranker.tuning import tune_ranker
 from src.s4_evaluation.metrics import ndcg_at_k, recall_of_candidates, source_report
 from src.s4_evaluation.submission import submission_comment, write_submission
 from src.utils import log
@@ -72,6 +73,12 @@ def log_importance(model: lgb.Booster, top: int = 20) -> None:
     log(f"top features: {top_list}")
 
 
+def log_params() -> None:
+    """Печатает параметры LightGBM и откуда они: подобранные режимом tune или по умолчанию."""
+    source = "tuned" if BEST_PARAMS_PATH.exists() else "default"
+    log(f"LightGBM params ({source}): {LGB_PARAMS}")
+
+
 def log_model_input(cands: pl.DataFrame, rows: int = 5) -> None:
     """Печатает вход ранкера: размер таблицы кандидатов и несколько случайных строк, признаки по строкам."""
     n = min(rows, cands.height)
@@ -83,27 +90,65 @@ def log_model_input(cands: pl.DataFrame, rows: int = 5) -> None:
         print(table)
 
 
-def validate(rounds: int) -> None:
-    """Режим validate: учит ранкер на прошлом train, печатает локальный NDCG@10 и сохраняет кандидатов для submit."""
-    past, T, truth = stage0_validation_slice()
+def build_slice(df: pl.DataFrame, T: int, end: int | None) -> tuple[pl.DataFrame, pl.DataFrame, list]:
+    """Кандидаты среза: признаки по событиям до T, метки по окну [T, end); возвращает кандидатов, truth и популярное."""
+    past, future = time_split(df, T, end)
+    truth = make_truth(future)
+    log(f"T={T}: past {past.height:,} events | future {future.height:,} events, {truth.height:,} positive pairs")
     cands, pop_items = stage2_labeled_candidates(past, T, truth)
-    log_model_input(cands)
-    del past
+    return cands, truth, pop_items
+
+
+def build_validation_folds() -> None:
+    """Строит и сохраняет кандидатов срезов A и B, правильные ответы B и популярное для быстрых запусков."""
+    df, T_a, T_b = stage0_validation_boundaries()
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    cands_a, _, _ = build_slice(df, T_a, T_b)
+    cands_a.write_parquet(FOLD_A_PATH)
+    del cands_a
     gc.collect()
+    cands_b, truth_b, pop_items = build_slice(df, T_b, None)
+    log_model_input(cands_b)
+    cands_b.write_parquet(FOLD_B_PATH)
+    truth_b.write_parquet(TRUTH_PATH)
+    POP_PATH.write_text(json.dumps(pop_items))
+    log(f"saved {FOLD_A_PATH}, {FOLD_B_PATH}, {TRUTH_PATH}, {POP_PATH}")
+
+
+def load_validation_folds() -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list]:
+    """Читает сохранённых кандидатов срезов A и B, правильные ответы B и популярное."""
+    log(f"reuse saved folds {FOLD_A_PATH}, {FOLD_B_PATH}")
+    pop_items = json.loads(POP_PATH.read_text())
+    return pl.read_parquet(FOLD_A_PATH), pl.read_parquet(FOLD_B_PATH), pl.read_parquet(TRUTH_PATH), pop_items
+
+
+def evaluate_ranker(rounds: int) -> None:
+    """Учит ранкер на срезе A, выбирает число деревьев и оценивает на срезе B; пишет val_result.json для submit."""
+    log_params()
+    cands_a, cands_b, truth, pop_items = load_validation_folds()
     tr_u, es_u, ev_u = split_users(truth["uid"].unique())
     log(f"users: train {len(tr_u):,} | early-stop {len(es_u):,} | eval {len(ev_u):,}")
-    train_cands = of_users(cands, tr_u)
-    early_stop_cands = of_users(cands, es_u)
-    model = train_ranker(train_cands, early_stop_cands, rounds)
-    eval_cands = of_users(cands, ev_u)
-    eval_truth = of_users(truth, ev_u)
-    scores = stage4_evaluate(model, eval_cands, eval_truth, pop_items)
+    model = train_ranker([of_users(cands_a, tr_u)], [of_users(cands_b, es_u)], rounds)
+    scores = stage4_evaluate(model, of_users(cands_b, ev_u), of_users(truth, ev_u), pop_items)
     log_importance(model)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    result = {"best_iter": model.best_iteration, **scores}
-    VAL_RESULT.write_text(json.dumps(result))
-    cands.write_parquet(FOLD_PATH)
-    log(f"saved {FOLD_PATH}")
+    VAL_RESULT.write_text(json.dumps({"best_iter": model.best_iteration, **scores}))
+
+
+def validate(rounds: int, ranker_only: bool) -> None:
+    """Режим validate: учит ранкер на срезе A, печатает локальный NDCG@10 на срезе B и сохраняет кандидатов."""
+    if not ranker_only:
+        build_validation_folds()
+    gc.collect()
+    evaluate_ranker(rounds)
+
+
+def tune(trials: int) -> None:
+    """Режим tune: Optuna подбирает параметры LightGBM на сохранённых кандидатах, результат в best_params.json."""
+    cands_a, cands_b, truth, _ = load_validation_folds()
+    tr_u, es_u, _ = split_users(truth["uid"].unique())
+    best = tune_ranker([of_users(cands_a, tr_u)], [of_users(cands_b, es_u)], trials)
+    BEST_PARAMS_PATH.write_text(json.dumps(best, indent=2))
+    log(f"best params saved to {BEST_PARAMS_PATH}, validate and submit will use them: {best}")
 
 
 def stage3_final_ranker(final_rounds: int) -> lgb.Booster:
