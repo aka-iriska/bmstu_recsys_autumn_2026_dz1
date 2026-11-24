@@ -20,19 +20,19 @@ LGB_DEFAULTS = dict(
     seed=SEED,
     num_threads=0,
 )
-ENSEMBLE_SIZE = int(os.environ.get("RECSYS_SEEDS", 1))  # сколько ранкеров с разными seed усредняется; 1 - один ранкер
+ENSEMBLE_SIZE = int(os.environ.get("RECSYS_SEEDS", 5))  # сколько ранкеров с разными seed усредняется; 1 - один
 MAX_ROUNDS = 2000
 EARLY_STOPPING = 100
 FINAL_ROUNDS_MULT = 1.3  # финальный ранкер учится на двух срезах всех пользователей, данных втрое больше
 TUNE_TRIALS = 30  # сколько наборов параметров перебирает Optuna в режиме tune
 TUNE_SPACE = {  # диапазоны поиска Optuna: (от, до, логарифмическая шкала)
     "num_leaves": (15, 255, True),
-    "min_data_in_leaf": (20, 500, True),
+    "min_data_in_leaf": (5, 300, True),
     "learning_rate": (0.03, 0.1, True),
-    "feature_fraction": (0.5, 1.0, False),
-    "bagging_fraction": (0.5, 1.0, False),
-    "lambda_l2": (0.001, 30.0, True),
-    "lambdarank_truncation_level": (10, 50, False),
+    "feature_fraction": (0.2, 1.0, False),
+    "bagging_fraction": (0.2, 1.0, False),
+    "lambda_l2": (0.001, 100.0, True),
+    "lambdarank_truncation_level": (10, 150, False),
 }
 
 

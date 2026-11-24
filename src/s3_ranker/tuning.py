@@ -52,5 +52,6 @@ def tune_ranker(train: list[pl.DataFrame], early_stop: list[pl.DataFrame], trial
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     sampler = optuna.samplers.TPESampler(seed=SEED)
     study = optuna.create_study(direction="maximize", sampler=sampler)
+    study.enqueue_trial({name: LGB_PARAMS[name] for name in TUNE_SPACE})  # первым проверяются текущие параметры
     study.optimize(_objective(dtrain, dvalid), n_trials=trials, callbacks=[_log_trial])
     return {**study.best_params, "best_iter": study.best_trial.user_attrs["best_iter"]}

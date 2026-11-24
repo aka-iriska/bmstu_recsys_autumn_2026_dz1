@@ -43,25 +43,10 @@ def to_lgb(frames: list[pl.DataFrame], feats: list[str], params: dict | None = N
     )
 
 
-def train_ranker(
-    train: list[pl.DataFrame],
-    early_stop: list[pl.DataFrame] | None = None,
-    rounds: int = MAX_ROUNDS,
-    seed: int = SEED,
-) -> lgb.Booster:
-    """Обучает LambdaRank на таблицах кандидатов train; пользователи без верных кандидатов не участвуют.
-
-    :param train: таблицы кандидатов для обучения, например срезы A и B
-    :param early_stop: таблицы кандидатов для ранней остановки; None - учить ровно rounds деревьев
-    :param seed: seed LightGBM: от него зависит, какие строки и признаки видит каждое дерево
-    """
-
-    params = {**LGB_PARAMS, "seed": seed}
-    feats = feature_cols(train[0])
-    dtrain = to_lgb(train, feats)
-    if early_stop is None:
+def _fit(params: dict, dtrain: lgb.Dataset, dvalid: lgb.Dataset | None, rounds: int) -> lgb.Booster:
+    """Обучает один ранкер LambdaRank; при заданном dvalid останавливается, когда оценка на нём перестаёт расти."""
+    if dvalid is None:
         return lgb.train(params, dtrain, num_boost_round=rounds)
-    dvalid = to_lgb(early_stop, feats)
     return lgb.train(
         params,
         dtrain,
@@ -115,8 +100,16 @@ def train_ensemble(
     rounds: int = MAX_ROUNDS,
     size: int = ENSEMBLE_SIZE,
 ) -> Ensemble:
-    """Обучает size ранкеров с seed SEED, SEED + 1, ... и объединяет их; при size = 1 это один обычный ранкер."""
-    models = [train_ranker(train, early_stop, rounds, SEED + i) for i in range(size)]
+    """Обучает size ранкеров с seed SEED, SEED + 1, ... на одних и тех же данных и объединяет их.
+
+    :param train: таблицы кандидатов для обучения, например срезы A и B; пользователи без верных кандидатов не участвуют
+    :param early_stop: таблицы кандидатов для ранней остановки; None - учить ровно rounds деревьев
+    :param size: сколько ранкеров усреднять; 1 - один обычный ранкер
+    """
+    feats = feature_cols(train[0])
+    dtrain = to_lgb(train, feats)
+    dvalid = None if early_stop is None else to_lgb(early_stop, feats)
+    models = [_fit({**LGB_PARAMS, "seed": SEED + i}, dtrain, dvalid, rounds) for i in range(size)]
     return Ensemble(models)
 
 
